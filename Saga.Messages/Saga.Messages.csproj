@@ -1,0 +1,7 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<ItemGroup>
+		<PackageReference Include="Rebus.SqlServer" Version="7.2.0" />
+	</ItemGroup>
+
+</Project>

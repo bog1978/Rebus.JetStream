@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+	<PropertyGroup>
+		<TargetFrameworks>net462</TargetFrameworks>
+		<LangVersion>8</LangVersion>
+	</PropertyGroup>
+
+</Project>
