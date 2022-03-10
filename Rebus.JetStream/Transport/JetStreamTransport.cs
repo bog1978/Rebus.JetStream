@@ -16,12 +16,13 @@ namespace Rebus.JetStream.Transport
     {
         #region Константы и поля
 
-        private const string CurrentStanMessageKey = "nats-transport-message";
+        private const string CurrentJetStreamMessageKey = "jetstream-transport-message";
 
         private readonly string _inputQueueName;
         private readonly ILog _log;
         private readonly IConnection _connection;
-        private readonly IJetStream _js;
+        private readonly IJetStream _jetStream;
+        private IJetStreamPullSubscription _sub;
 
         #endregion
 
@@ -33,7 +34,7 @@ namespace Rebus.JetStream.Transport
             _log = rebusLoggerFactory.GetLogger<JetStreamTransport>();
             var factory = new ConnectionFactory();
             _connection = factory.CreateConnection();
-            _js = _connection.CreateJetStreamContext();
+            _jetStream = _connection.CreateJetStreamContext();
         }
 
         #endregion
@@ -43,45 +44,63 @@ namespace Rebus.JetStream.Transport
         public override void CreateQueue(string address)
         {
             // Очереди создаются во время подписки или публикации.
+            try
+            {
+                CreateStreamWhenDoesNotExist(_inputQueueName, _inputQueueName);
+
+                _sub = _jetStream.PullSubscribe(
+                    _inputQueueName,
+                    PullSubscribeOptions
+                        .Builder()
+                        .WithStream(_inputQueueName)
+                        .WithDurable(_inputQueueName)
+                        .Build());
+
+            }
+            catch (Exception ex)
+            {
+                throw;
+            }
         }
 
         public override Task<TransportMessage> Receive(ITransactionContext context, CancellationToken cancellationToken)
         {
-            //context.OnDisposed(DisposedAction);
-            context.OnCompleted(CompletedAction);
-            //context.OnAborted(AbortedAction);
-            //context.OnCommitted(CommitAction);
-
-            var tcs = new TaskCompletionSource<TransportMessage>();
-
-            void Handler(object sender, MsgHandlerEventArgs e)
+            TransportMessage Receive()
             {
-                context.GetOrAdd(CurrentStanMessageKey, () => e.Message);
+                Msg msg = null;
                 try
                 {
-                    var msg = e.Message.Deserialize();
-                    var isOk = tcs.TrySetResult(msg);
-                    if (!isOk)
-                    {
-                    }
+                    msg = _sub.NextMessage(1000);
                 }
-                catch (Exception ex)
+                catch (NATSTimeoutException ex)
                 {
-                    tcs.SetException(ex);
+                    return null;
                 }
+
+                var message = msg.Deserialize();
+
+                return message;
             }
 
-            var subscription = _js.PushSubscribeAsync(_inputQueueName, Handler, false);
-
-            tcs.Task.Wait(cancellationToken);
-            return tcs.Task;
+            return Task.Run(Receive);
         }
 
-        protected override Task SendOutgoingMessages(IEnumerable<OutgoingMessage> outgoingMessages, ITransactionContext context)
+        protected override async Task SendOutgoingMessages(IEnumerable<OutgoingMessage> outgoingMessages, ITransactionContext context)
         {
-            foreach (var message in outgoingMessages)
-                _connection.Publish(message.DestinationAddress, message.Serialize());
-            return Task.FromResult(true);
+            try
+            {
+                foreach (var message in outgoingMessages)
+                {
+                    CreateStreamWhenDoesNotExist(message.DestinationAddress, message.DestinationAddress);
+                    var msg = message.Serialize();
+                    var ack = await _jetStream.PublishAsync(msg);
+                    ack.ThrowOnHasError();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw;
+            }
         }
 
         #endregion
@@ -90,54 +109,41 @@ namespace Rebus.JetStream.Transport
 
         public void Dispose()
         {
-            _connection?.Dispose();
+            if (_sub != null)
+            {
+                _sub.Unsubscribe();
+                _sub.Drain();
+                _sub.Dispose();
+            }
+            if (_connection != null)
+            {
+                _connection.Drain();
+                _connection.Dispose();
+            }
         }
 
         #endregion
 
-        #region Другое
-
-        private void AbortedAction(ITransactionContext ctx)
+        public void CreateStreamWhenDoesNotExist(string stream, params string[] subjects)
         {
-            //_log.Info("OnAborted");
-        }
+            var jsm = _connection.CreateJetStreamManagementContext();
 
-        private Task CommitAction(ITransactionContext ctx)
-        {
-            //_log.Info("OnCommitted");
-            return Task.FromResult(true);
-        }
-
-        private Task CompletedAction(ITransactionContext ctx)
-        {
             try
             {
-                var stanMsg = ctx.GetOrAdd<Msg>(CurrentStanMessageKey, null);
-
-                if (stanMsg != null)
-                {
-                    stanMsg.Ack();
-                    stanMsg.ArrivalSubscription.Unsubscribe();
-                    //stanMsg.Subscription.Dispose();
-                }
-                else
-                {
-                }
+                jsm.GetStreamInfo(stream); // this throws if the stream does not exist
+                return;
             }
-            catch (Exception ex)
+            catch (NATSJetStreamException)
             {
-                // Ignore
+                /* stream does not exist */
             }
 
-            //_log.Info("OnCompleted");
-            return Task.FromResult(true);
+            StreamConfiguration sc = StreamConfiguration.Builder()
+                .WithName(stream)
+                .WithStorageType(StorageType.Memory)
+                .WithSubjects(subjects)
+                .Build();
+            jsm.AddStream(sc);
         }
-
-        private void DisposedAction(ITransactionContext ctx)
-        {
-            //_log.Info("OnDisposed");
-        }
-
-        #endregion
     }
 }

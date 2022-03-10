@@ -47,21 +47,16 @@ namespace Saga.Messages
                 TimeSpan.FromMilliseconds(1000)*/);
         }
 
+        //private static void ConfigureTransport(StandardConfigurer<ITransport> t, string queueName)
+        //{
+        //    var connectionString = ConfigurationManager.AppSettings["RebusConnectionSetting"];
+        //    var opt = new SqlServerTransportOptions(connectionString);
+        //    t.UseSqlServer(opt, queueName);
+        //}
+
         private static void ConfigureTransport(StandardConfigurer<ITransport> t, string queueName)
         {
-            var connectionString = ConfigurationManager.AppSettings["RebusConnectionSetting"];
-            var opt = new SqlServerTransportOptions(connectionString);
-            t.UseSqlServer(opt, queueName);
+            t.UseNatsStreaming(queueName);
         }
-
-        //private static void ConfigureTransport(StandardConfigurer<ITransport> t, string queueName)
-        //{
-        //    t.UseNatsStreaming(queueName);
-        //}
-
-        //private static void ConfigureTransport(StandardConfigurer<ITransport> t, string queueName)
-        //{
-        //    t.UseServiceBroker(queueName);
-        //}
     }
 }

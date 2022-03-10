@@ -1,0 +1,1 @@
+start nats-server.exe -js -m 8222
