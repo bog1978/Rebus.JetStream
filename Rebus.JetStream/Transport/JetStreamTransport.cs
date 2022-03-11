@@ -16,13 +16,11 @@ namespace Rebus.JetStream.Transport
     {
         #region Константы и поля
 
-        private const string CurrentJetStreamMessageKey = "jetstream-transport-message";
-
-        private readonly string _inputQueueName;
         private readonly ILog _log;
         private readonly IConnection _connection;
         private readonly IJetStream _jetStream;
-        private IJetStreamPullSubscription _sub;
+        private IJetStreamManagement _jsm;
+        private IJetStreamPushSyncSubscription _sub;
 
         #endregion
 
@@ -30,11 +28,18 @@ namespace Rebus.JetStream.Transport
 
         public JetStreamTransport(string inputQueueName, IRebusLoggerFactory rebusLoggerFactory) : base(inputQueueName)
         {
-            _inputQueueName = inputQueueName;
-            _log = rebusLoggerFactory.GetLogger<JetStreamTransport>();
-            var factory = new ConnectionFactory();
-            _connection = factory.CreateConnection();
-            _jetStream = _connection.CreateJetStreamContext();
+            try
+            {
+                _log = rebusLoggerFactory.GetLogger<JetStreamTransport>();
+                var factory = new ConnectionFactory();
+                _connection = factory.CreateConnection();
+                _jetStream = _connection.CreateJetStreamContext();
+                _jsm = _connection.CreateJetStreamManagementContext();
+            }
+            catch (Exception ex)
+            {
+                throw;
+            }
         }
 
         #endregion
@@ -43,28 +48,40 @@ namespace Rebus.JetStream.Transport
 
         public override void CreateQueue(string address)
         {
-            // Очереди создаются во время подписки или публикации.
             try
             {
-                CreateStreamWhenDoesNotExist(_inputQueueName, _inputQueueName);
-
-                _sub = _jetStream.PullSubscribe(
-                    _inputQueueName,
-                    PullSubscribeOptions
-                        .Builder()
-                        .WithStream(_inputQueueName)
-                        .WithDurable(_inputQueueName)
-                        .Build());
-
+                CreateQueueIfNotExists(address);
             }
             catch (Exception ex)
             {
+                _log.Error(ex, "CreateQueue failed.");
+                throw;
+            }
+        }
+
+        private bool _subscribed;
+
+        private void Subscribe()
+        {
+            if (_subscribed)
+                return;
+            try
+            {
+                CreateQueueIfNotExists(Address);
+                var pso = PushSubscribeOptions.BindTo(Address + "-stream", Address + "-durable");
+                _sub = _jetStream.PushSubscribeSync(Address + "-subject", Address + "-queue", pso);
+                _subscribed = true;
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Subscribe failed.");
                 throw;
             }
         }
 
         public override Task<TransportMessage> Receive(ITransactionContext context, CancellationToken cancellationToken)
         {
+            Subscribe();
             TransportMessage Receive()
             {
                 Msg msg = null;
@@ -78,6 +95,11 @@ namespace Rebus.JetStream.Transport
                 }
 
                 var message = msg.Deserialize();
+                context.OnCompleted(ctx =>
+                {
+                    msg.Ack();
+                    return Task.FromResult(true);
+                });
 
                 return message;
             }
@@ -91,7 +113,7 @@ namespace Rebus.JetStream.Transport
             {
                 foreach (var message in outgoingMessages)
                 {
-                    CreateStreamWhenDoesNotExist(message.DestinationAddress, message.DestinationAddress);
+                    CreateQueueIfNotExists(message.DestinationAddress);
                     var msg = message.Serialize();
                     var ack = await _jetStream.PublishAsync(msg);
                     ack.ThrowOnHasError();
@@ -99,6 +121,7 @@ namespace Rebus.JetStream.Transport
             }
             catch (Exception ex)
             {
+                _log.Error(ex, "SendOutgoingMessages failed.");
                 throw;
             }
         }
@@ -111,7 +134,6 @@ namespace Rebus.JetStream.Transport
         {
             if (_sub != null)
             {
-                _sub.Unsubscribe();
                 _sub.Drain();
                 _sub.Dispose();
             }
@@ -124,26 +146,36 @@ namespace Rebus.JetStream.Transport
 
         #endregion
 
-        public void CreateStreamWhenDoesNotExist(string stream, params string[] subjects)
+        public void CreateQueueIfNotExists(string subject)
         {
-            var jsm = _connection.CreateJetStreamManagementContext();
+            var streamName = subject + "-stream";
 
             try
             {
-                jsm.GetStreamInfo(stream); // this throws if the stream does not exist
-                return;
-            }
-            catch (NATSJetStreamException)
-            {
-                /* stream does not exist */
-            }
+                var streams = _jsm.GetStreamNames();
+                if (streams.Contains(streamName))
+                    return;
 
-            StreamConfiguration sc = StreamConfiguration.Builder()
-                .WithName(stream)
-                .WithStorageType(StorageType.Memory)
-                .WithSubjects(subjects)
-                .Build();
-            jsm.AddStream(sc);
+                var sc = StreamConfiguration
+                    .Builder()
+                    .WithStorageType(StorageType.File)
+                    .WithName(streamName)
+                    .WithSubjects((string)(subject + "-subject"))
+                    .Build();
+                _jsm.AddStream(sc);
+
+                var cc = ConsumerConfiguration.Builder()
+                    .WithDurable(subject + "-durable")
+                    .WithDeliverSubject(subject + "-deliver")
+                    .WithDeliverGroup(subject + "-queue")
+                    .Build();
+                _jsm.AddOrUpdateConsumer(streamName, cc);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "CreateQueueIfNotExists failed.");
+                throw;
+            }
         }
     }
 }

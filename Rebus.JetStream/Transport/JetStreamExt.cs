@@ -1,6 +1,4 @@
 ﻿using System.Collections.Generic;
-using System.IO;
-using System.Text;
 
 using NATS.Client;
 
@@ -16,7 +14,7 @@ namespace Rebus.JetStream.Transport
             var headers = new MsgHeader();
             foreach (var h in message.TransportMessage.Headers)
                 headers.Add(h.Key, h.Value);
-            return new Msg(message.DestinationAddress, headers, message.TransportMessage.Body);
+            return new Msg(message.DestinationAddress + "-subject", headers, message.TransportMessage.Body);
         }
 
         public static TransportMessage Deserialize(this Msg msg)
